@@ -38,23 +38,22 @@ export class MockDocProvider implements DocProvider {
     }
   }
 
-  async search(query: string, opts?: { limit?: number; signal?: AbortSignal }): Promise<DocHit[]> {
+  async search(query: string, opts?: { limit?: number; section?: string; signal?: AbortSignal }): Promise<DocHit[]> {
     await this.ensureLoaded();
     const terms = tokenize(query);
     const scored: { doc: Doc; score: number }[] = [];
     for (const doc of this.docs.values()) {
+      if (opts?.section && doc.section !== opts.section) continue;
       const score = scoreDoc(doc, terms);
       if (score > 0) scored.push({ doc, score });
     }
     scored.sort((a, b) => b.score - a.score);
     const limit = opts?.limit ?? 8;
-    return scored.slice(0, limit).map(({ doc, score }) => ({
-      id: doc.id,
-      title: doc.title,
-      url: doc.url,
-      score,
-      snippet: buildSnippet(doc.body, terms),
-    }));
+    return scored.slice(0, limit).map(({ doc, score }) => {
+      const hit: DocHit = { id: doc.id, title: doc.title, url: doc.url, score, snippet: buildSnippet(doc.body, terms) };
+      if (doc.section) hit.section = doc.section;
+      return hit;
+    });
   }
 
   async read(id: string): Promise<Doc | null> {
@@ -138,9 +137,11 @@ function tokenize(text: string): string[] {
     .filter((t) => t.length > 1);
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  return haystack.split(needle).length - 1;
+function countOccurrences(haystack: string, term: string): number {
+  if (!term) return 0;
+  // Whole-word match: raw substring counting would count "for" inside "platform" or
+  // "before", which is noise, not relevance.
+  return (haystack.match(new RegExp(`\\b${term}\\b`, 'g')) ?? []).length;
 }
 
 function scoreDoc(doc: Doc, terms: string[]): number {

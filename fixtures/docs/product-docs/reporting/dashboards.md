@@ -1,8 +1,8 @@
 ---
 title: Reporting Dashboards
-section: Reporting
+section: product-docs
 url: /docs/reporting/dashboards/
-path: Reporting / Dashboards
+path: Product Docs / Reporting / Dashboards
 updatedAt: 2025-02-18
 ---
 # Reporting Dashboards

@@ -1,8 +1,8 @@
 ---
 title: Campaigns Overview
-section: Campaigns
+section: product-docs
 url: /docs/campaigns/overview/
-path: Campaigns / Overview
+path: Product Docs / Campaigns / Overview
 updatedAt: 2025-04-02
 ---
 # Campaigns Overview

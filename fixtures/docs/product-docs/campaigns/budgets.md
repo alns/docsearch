@@ -1,8 +1,8 @@
 ---
 title: Campaign Budgets
-section: Campaigns
+section: product-docs
 url: /docs/campaigns/budgets/
-path: Campaigns / Budgets
+path: Product Docs / Campaigns / Budgets
 updatedAt: 2025-06-01
 ---
 # Campaign Budgets
@@ -21,9 +21,10 @@ the flight's end date.
 ## Increasing a budget mid-flight
 
 Budget increases above the original cap require approval before they take
-effect. See the [Governance Model](../governance/model.md) for who can
-approve an increase and how the approval chain works. Requests submitted
-without the required approval are held in a pending state and do not spend.
+effect. See the [Budget Governance Model](https://wiki.internal.example.com/strategy/budget-governance)
+for the policy behind approval thresholds and how the approval chain works.
+Requests submitted without the required approval are held in a pending
+state and do not spend.
 
 ## Currency and rounding
 

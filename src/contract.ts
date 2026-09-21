@@ -23,6 +23,7 @@ export interface DocHit {
   url: string;
   snippet: string;
   score?: number;
+  section?: string; // which source/repo this hit came from — federated providers should always set this
 }
 
 export interface DocSummary {
@@ -38,7 +39,13 @@ export interface DocSummary {
  * provided for local development and tests. The agent never bypasses it.
  */
 export interface DocProvider {
-  search(query: string, opts?: { limit?: number; signal?: AbortSignal }): Promise<DocHit[]>;
+  /**
+   * `opts.section`, when present, restricts the search to one source/repo
+   * (as also used by `list`). Optional on both sides: a provider may ignore
+   * it (returning unscoped results), and the agent never requires it — it's
+   * a precision lever the model can reach for, not a routing gate.
+   */
+  search(query: string, opts?: { limit?: number; section?: string; signal?: AbortSignal }): Promise<DocHit[]>;
   read(id: string, opts?: { signal?: AbortSignal }): Promise<Doc | null>;
   list(section?: string, opts?: { signal?: AbortSignal }): Promise<DocSummary[]>;
   /**

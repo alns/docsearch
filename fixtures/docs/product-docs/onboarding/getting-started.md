@@ -1,8 +1,8 @@
 ---
 title: Getting Started
-section: Onboarding
+section: product-docs
 url: /docs/onboarding/getting-started/
-path: Onboarding / Getting Started
+path: Product Docs / Onboarding / Getting Started
 updatedAt: 2025-01-10
 ---
 # Getting Started

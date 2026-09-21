@@ -1,8 +1,8 @@
 ---
 title: Campaign Targeting
-section: Campaigns
+section: product-docs
 url: /docs/campaigns/targeting/
-path: Campaigns / Targeting
+path: Product Docs / Campaigns / Targeting
 updatedAt: 2025-03-11
 ---
 # Campaign Targeting

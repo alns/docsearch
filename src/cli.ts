@@ -8,6 +8,21 @@ import type { LlmAdapter } from './contract.js';
 
 const DEFAULT_DOCS_DIR = fileURLToPath(new URL('../fixtures/docs', import.meta.url));
 
+// Real routing signal for a real model: the deterministic StubLlmAdapter never reads this
+// (it doesn't look at the system prompt at all), but a tool-calling model does, and this is
+// what tells it what each federated section is actually for.
+const SECTION_DESCRIPTIONS = `
+The corpus spans three sections, federated from separate internal repos:
+- product-docs: user-facing how-tos and tutorials — the mechanics of using the product.
+- strategy: internal product strategy, upstream of requirements — the "why" behind a policy, not the "how."
+- team-docs: internal, how the team works — process and role assignment, not product behavior or rationale.
+
+Prefer an unscoped search_docs call by default; pass "section" only when you're
+already confident which one the answer lives in. A question can legitimately need
+docs from more than one section — follow references you find, including across
+sections, rather than assuming the first section you find is the only relevant one.
+`.trim();
+
 function parseArgs(argv: string[]) {
   const args = [...argv];
   let docsDir = DEFAULT_DOCS_DIR;
@@ -44,7 +59,7 @@ async function main(): Promise<void> {
     llm = new StubLlmAdapter();
   }
 
-  const agent = createAgenticSearch({ provider, llm });
+  const agent = createAgenticSearch({ provider, llm, options: { systemPrompt: SECTION_DESCRIPTIONS } });
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
 

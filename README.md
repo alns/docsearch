@@ -10,8 +10,8 @@ here develops and tests against a mock.
 
 ```bash
 npm install
-npm test          # 14 tests: grounding, refusal, caps, multi-hop, cancellation
-npm run ask -- ask "How do campaigns handle budget increases, and where's the governance model that approves them?"
+npm test          # 18 tests: grounding, refusal, caps, multi-hop, cancellation, section filtering
+npm run ask -- ask "How does daily pacing work, and how are rounding remainders handled for campaign budgets?"
 ```
 
 The CLI runs against the sample corpus in `fixtures/docs/` using the
@@ -24,7 +24,7 @@ markdown files.
 
 ```ts
 interface DocProvider {
-  search(query: string, opts?: { limit?: number; signal?: AbortSignal }): Promise<DocHit[]>;
+  search(query: string, opts?: { limit?: number; section?: string; signal?: AbortSignal }): Promise<DocHit[]>;
   read(id: string, opts?: { signal?: AbortSignal }): Promise<Doc | null>;
   list(section?: string, opts?: { signal?: AbortSignal }): Promise<DocSummary[]>;
   resolveRef?(ref: string, opts?: { signal?: AbortSignal }): Promise<DocSummary | null>; // optional
@@ -89,6 +89,44 @@ events. This trades true token-by-token streaming of the very first draft
 for a guarantee that nothing shown to the user is later invalidated by a
 tool call the model decides to make after all.
 
+## Federating multiple content sources
+
+If the docs actually live in several repos with different audiences or
+purposes (user-facing product docs, internal strategy docs upstream of
+requirements, internal team-process docs), route between them with two
+additive, non-breaking pieces — no change to the loop itself:
+
+1. **A federating `DocProvider`.** Write one wrapper that composes N
+   per-repo providers: `search()`/`list()` fan out to each and merge
+   results, tagging every hit and summary with `section` (the repo it came
+   from — `DocHit.section` exists for exactly this). This is the *only*
+   place multi-repo-ness exists; the agent still sees one `DocProvider`.
+2. **Section descriptions in the system prompt.** `search_docs` returning a
+   `section` label tells the model *where* a hit came from, but not what
+   that section is *for* — two repos can use similar vocabulary for
+   different things ("budget" in a how-to vs. in a policy rationale doc).
+   Put a one-line description of each section's purpose in
+   `AgentOptions.systemPrompt`; `src/cli.ts`'s `SECTION_DESCRIPTIONS`
+   constant is a working example against this repo's three-section corpus.
+
+`search_docs` also takes an optional `section` argument the model can use
+to narrow a call once it has a specific reason to. **Don't go further and
+hard-route the whole question to one repo before retrieval starts.** That
+would need to guess the right repo with less information than the agent
+has after even one read, and it breaks the thing this architecture is
+built for: a question can legitimately need a fact from one repo and
+rationale from another, discovered only by following a reference — the
+same mechanism as a same-repo multi-hop, just crossing a section boundary
+(see `tests/multihop.test.ts`, where `product-docs/campaigns/budgets.md`
+links to `strategy/budget-governance.md`). Let the model search unscoped
+by default and narrow only when confident; never pre-classify and gate.
+
+Authorization is a different problem from routing and isn't handled here:
+if different callers should see different sections at all (not just be
+routed between ones they can all see), that's enforced by constructing a
+different federating `DocProvider` per caller/audience *before* the agent
+is built — never inside the loop, and never left to the model's judgment.
+
 ## Package layout
 
 ```
@@ -100,8 +138,9 @@ src/
   llm/stubAdapter.ts       deterministic, corpus-aware LlmAdapter for tests and the CLI
   llm/geminiAdapter.ts     concrete LlmAdapter for Gemini function-calling + streaming
   cli.ts                   `ask "<question>"` demo
-fixtures/docs/             7-doc sample corpus (4 sections, one cross-link) for tests/demo
-tests/                     grounding, refusal, caps, multi-hop, cancellation
+fixtures/docs/             7-doc sample corpus across 3 sections (product-docs, strategy, team-docs)
+                           with a cross-repo link, for tests/demo
+tests/                     grounding, refusal, caps, multi-hop, cancellation, section filtering
 ```
 
 ## Tests
@@ -119,11 +158,15 @@ npm test
 - **`caps.test.ts`** — `maxToolCalls`, `maxIterations`, and `maxReadChars`
   are never exceeded, and the agent always still reaches `done`, never
   `error`, when a cap cuts retrieval short.
-- **`multihop.test.ts`** — the budgets→governance cross-link in the sample
-  corpus is followed, and both docs end up cited.
+- **`multihop.test.ts`** — a cross-*repo* link (product-docs → strategy) in
+  the sample corpus is followed, and both docs end up cited, driven by the
+  reference the agent found rather than by the question naming both topics.
 - **`cancellation.test.ts`** — aborting before or mid-loop stops further
   provider calls and always yields exactly one terminal event
   (`{ type: 'error', message: 'cancelled' }`).
+- **`sections.test.ts`** — `MockDocProvider.search` tags hits with their
+  section and honors a `section` filter; the agent forwards a model's
+  `section` argument through to the provider unchanged.
 
 ## Swapping in a real content store
 

@@ -34,12 +34,17 @@ function buildToolDefs(provider: DocProvider): LlmToolDef[] {
     {
       name: 'search_docs',
       description:
-        'Search the documentation corpus for candidate docs matching a query. Returns id, title, url, and a snippet for each hit.',
+        'Search the documentation corpus for candidate docs matching a query. Returns id, title, url, section, and a snippet for each hit. The corpus spans multiple sections (sources) with different purposes — see the system prompt for what each one covers.',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Natural language or keyword search query.' },
           limit: { type: 'integer', description: 'Maximum number of hits to return.' },
+          section: {
+            type: 'string',
+            description:
+              'Optional: restrict the search to one section/source when you are confident which one the answer lives in. Omit to search across all sections — prefer omitting unless you have a specific reason to narrow.',
+          },
         },
         required: ['query'],
       },
@@ -120,8 +125,9 @@ async function executeTool(call: LlmToolCall, ctx: ToolCtx): Promise<{ result: T
       case 'search_docs': {
         const query = String(args.query ?? '');
         const limit = typeof args.limit === 'number' ? args.limit : undefined;
-        const hits = await ctx.provider.search(query, { limit, signal: ctx.signal });
-        return { result: hits, status: `searching: "${query}"` };
+        const section = typeof args.section === 'string' ? args.section : undefined;
+        const hits = await ctx.provider.search(query, { limit, section, signal: ctx.signal });
+        return { result: hits, status: section ? `searching "${section}": "${query}"` : `searching: "${query}"` };
       }
       case 'read_doc': {
         const id = String(args.id ?? '');
