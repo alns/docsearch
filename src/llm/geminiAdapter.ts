@@ -1,13 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import type { LlmAdapter, LlmMessage, LlmStreamEvent, LlmToolDef } from '../contract.js';
 
+export interface GeminiVertexOptions {
+  project: string;
+  location: string; // e.g. "us-central1"
+  /**
+   * Supplies a fresh access token per request. This module takes no dependency on Google auth
+   * libraries — token acquisition (Application Default Credentials, a service account,
+   * workload identity, …) is inherently environment-specific, so the host owns it and is
+   * responsible for its own caching/refresh.
+   */
+  getAccessToken: () => Promise<string>;
+}
+
 export interface GeminiAdapterOptions {
-  /** Defaults to process.env.GEMINI_API_KEY (or GOOGLE_API_KEY). */
-  apiKey?: string;
   /** Model id, e.g. "gemini-2.0-flash". Pass explicitly — model ids change over time. */
   model: string;
-  /** Defaults to the public Generative Language API. */
+  /** API-key mode (default). Defaults to process.env.GEMINI_API_KEY (or GOOGLE_API_KEY). */
+  apiKey?: string;
+  /** Vertex AI mode: pass this instead of `apiKey` to call Vertex AI rather than the public API. */
+  vertex?: GeminiVertexOptions;
+  /** Overrides the API base URL. Defaults per mode (public Generative Language API vs. a regional Vertex endpoint). */
   baseUrl?: string;
+  /** Sampling temperature, passed through to generationConfig when set. */
+  temperature?: number;
+  /** Caps response length; defaults to 4096 to avoid a long answer being silently truncated. */
+  maxOutputTokens?: number;
 }
 
 interface GeminiPart {
@@ -31,20 +49,37 @@ interface GeminiStreamChunk {
  * Talks to `models/{model}:streamGenerateContent?alt=sse` directly over
  * fetch/SSE — no SDK dependency, since the LlmAdapter contract is already a
  * minimal enough surface that a thin REST mapping is simplest to audit.
+ * Supports both the public API-key endpoint and Vertex AI.
  */
 export class GeminiLlmAdapter implements LlmAdapter {
-  private readonly apiKey: string;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly temperature: number | undefined;
+  private readonly maxOutputTokens: number;
+  private readonly mode: 'api-key' | 'vertex';
+  private readonly apiKey?: string;
+  private readonly vertex?: GeminiVertexOptions;
 
   constructor(opts: GeminiAdapterOptions) {
-    const apiKey = opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      throw new Error('GeminiLlmAdapter requires an API key (opts.apiKey, GEMINI_API_KEY, or GOOGLE_API_KEY).');
-    }
-    this.apiKey = apiKey;
     this.model = opts.model;
-    this.baseUrl = opts.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
+    this.temperature = opts.temperature;
+    this.maxOutputTokens = opts.maxOutputTokens ?? 4096;
+
+    if (opts.vertex) {
+      this.mode = 'vertex';
+      this.vertex = opts.vertex;
+      this.baseUrl = opts.baseUrl ?? `https://${opts.vertex.location}-aiplatform.googleapis.com/v1`;
+    } else {
+      const apiKey = opts.apiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+      if (!apiKey) {
+        throw new Error(
+          'GeminiLlmAdapter requires an API key (opts.apiKey, GEMINI_API_KEY, or GOOGLE_API_KEY) or opts.vertex for Vertex AI mode.',
+        );
+      }
+      this.mode = 'api-key';
+      this.apiKey = apiKey;
+      this.baseUrl = opts.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
+    }
   }
 
   async *streamChat(params: {
@@ -60,16 +95,19 @@ export class GeminiLlmAdapter implements LlmAdapter {
       .join('\n\n');
     const contents = toGeminiContents(messages);
 
-    const body: Record<string, unknown> = { contents };
+    const generationConfig: Record<string, unknown> = { maxOutputTokens: this.maxOutputTokens };
+    if (this.temperature !== undefined) generationConfig.temperature = this.temperature;
+
+    const body: Record<string, unknown> = { contents, generationConfig };
     if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
     if (tools.length > 0) {
       body.tools = [{ functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })) }];
     }
 
-    const url = `${this.baseUrl}/models/${this.model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(this.apiKey)}`;
+    const { url, headers } = await this.buildRequest();
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify(body),
       signal,
     });
@@ -101,12 +139,40 @@ export class GeminiLlmAdapter implements LlmAdapter {
 
     yield { type: 'end', finishReason: mapFinishReason(finishReason, sawFunctionCall) };
   }
+
+  private async buildRequest(): Promise<{ url: string; headers: Record<string, string> }> {
+    if (this.mode === 'vertex') {
+      const { project, location, getAccessToken } = this.vertex!;
+      const token = await getAccessToken();
+      const url = `${this.baseUrl}/projects/${project}/locations/${location}/publishers/google/models/${this.model}:streamGenerateContent?alt=sse`;
+      return { url, headers: { authorization: `Bearer ${token}` } };
+    }
+    // Key goes in a header, not the URL query string — a query-string key can end up in proxy
+    // and server access logs; a header is the documented, log-safe way to send it.
+    const url = `${this.baseUrl}/models/${this.model}:streamGenerateContent?alt=sse`;
+    return { url, headers: { 'x-goog-api-key': this.apiKey! } };
+  }
 }
 
-function toGeminiContents(messages: LlmMessage[]): GeminiContent[] {
+export function toGeminiContents(messages: LlmMessage[]): GeminiContent[] {
   const contents: GeminiContent[] = [];
+  let pendingToolParts: GeminiPart[] = [];
+
+  const flushToolParts = () => {
+    if (pendingToolParts.length === 0) return;
+    // Gemini expects all functionResponses answering one turn's (possibly parallel)
+    // functionCalls grouped into a single content block, not one block per response.
+    contents.push({ role: 'user', parts: pendingToolParts });
+    pendingToolParts = [];
+  };
+
   for (const m of messages) {
     if (m.role === 'system') continue; // folded into systemInstruction
+    if (m.role === 'tool') {
+      pendingToolParts.push({ functionResponse: { name: m.name ?? 'unknown', response: { result: safeJson(m.content) } } });
+      continue;
+    }
+    flushToolParts();
     if (m.role === 'user') {
       contents.push({ role: 'user', parts: [{ text: m.content }] });
     } else if (m.role === 'assistant') {
@@ -116,13 +182,9 @@ function toGeminiContents(messages: LlmMessage[]): GeminiContent[] {
         parts.push({ functionCall: { name: call.name, args: safeJson(call.arguments) } });
       }
       contents.push({ role: 'model', parts });
-    } else if (m.role === 'tool') {
-      contents.push({
-        role: 'user',
-        parts: [{ functionResponse: { name: m.name ?? 'unknown', response: { result: safeJson(m.content) } } }],
-      });
     }
   }
+  flushToolParts();
   return contents;
 }
 

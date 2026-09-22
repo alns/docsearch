@@ -9,7 +9,7 @@ import type {
   LlmToolCall,
   LlmToolDef,
 } from './contract.js';
-import { stripCitationMarkers } from './citations.js';
+import { CitationFilter, stripCitationMarkers } from './citations.js';
 
 const DEFAULT_OPTIONS: Required<AgentOptions> = {
   maxIterations: 8,
@@ -17,6 +17,11 @@ const DEFAULT_OPTIONS: Required<AgentOptions> = {
   maxReadChars: 20_000,
   systemPrompt: '',
 };
+
+// Last-resort text when a forced-final turn produces no usable content at all (a model that
+// generates nothing, or a non-compliant adapter whose only output was a tool-call we refuse to
+// act on since no tools were offered). Never surfaced when the model produces any real text.
+export const EMPTY_ANSWER_FALLBACK = 'No answer was generated from the retrieved information.';
 
 const CORE_INSTRUCTIONS = `
 You are a documentation search assistant. Answer only using information retrieved via the search_docs, read_doc, and list_docs tools (and resolve_reference, when offered). Never use prior knowledge and never invent facts, doc titles, or URLs.
@@ -226,10 +231,49 @@ export function createAgenticSearch(deps: AgenticSearchDeps): AgenticSearch {
         let textBuf = '';
         const toolCallsThisTurn: LlmToolCall[] = [];
 
+        // forceFinal means tools=[] was offered, so no legitimate tool-call can occur this
+        // turn — that's known up front, not just after the fact. That lets this specific turn
+        // stream text-deltas straight through to the caller as they arrive, instead of
+        // buffering the whole turn and re-chunking it afterward. An ambiguous turn (tools
+        // offered) still can't stream live: whether it's final is only known once it ends
+        // with zero tool-calls, so it keeps buffering until then.
+        const liveFilter = forceFinal ? new CitationFilter(ctx.readSet) : undefined;
+        let liveText = '';
+
         for await (const ev of llm.streamChat({ messages, tools, signal })) {
           throwIfAborted(signal);
-          if (ev.type === 'text-delta') textBuf += ev.text;
-          else if (ev.type === 'tool-call') toolCallsThisTurn.push(ev.toolCall);
+          if (ev.type === 'text-delta') {
+            if (liveFilter) {
+              const safe = liveFilter.push(ev.text);
+              if (safe) {
+                liveText += safe;
+                yield { type: 'token', text: safe };
+              }
+            } else {
+              textBuf += ev.text;
+            }
+          } else if (ev.type === 'tool-call' && !forceFinal) {
+            // A tool-call while forceFinal is true would come from a non-compliant adapter
+            // (no tools were offered this turn) — never act on one, since it was never
+            // validated against a real tool schema and executing it could mean calling the
+            // provider with an arbitrary, unchecked id.
+            toolCallsThisTurn.push(ev.toolCall);
+          }
+        }
+
+        if (forceFinal) {
+          const { trailing } = liveFilter!.finish();
+          if (trailing) {
+            liveText += trailing;
+            yield { type: 'token', text: trailing };
+          }
+          const answer = liveText.trim();
+          if (answer) {
+            yield { type: 'done', answer, citations: liveFilter!.citations() };
+          } else {
+            yield* emitEmptyAnswerFallback();
+          }
+          return;
         }
 
         if (toolCallsThisTurn.length === 0) {
@@ -252,9 +296,9 @@ export function createAgenticSearch(deps: AgenticSearchDeps): AgenticSearch {
         }
       }
 
-      // Defensive: loop always returns via forceFinal on the last iteration, but
-      // guard against a misbehaving adapter that emits tool calls with no tools offered.
-      yield* finalize('', ctx.readSet);
+      // Unreachable unless maxIterations <= 0: the loop always returns via the forceFinal
+      // branch on its last iteration otherwise.
+      yield* emitEmptyAnswerFallback();
     } catch (err) {
       if (isAbortError(err) || err instanceof Cancelled) {
         yield { type: 'error', message: 'cancelled' };
@@ -272,6 +316,11 @@ export function createAgenticSearch(deps: AgenticSearchDeps): AgenticSearch {
       yield { type: 'token', text: chunk };
     }
     yield { type: 'done', answer: trimmed, citations };
+  }
+
+  function* emitEmptyAnswerFallback(): Generator<AskEvent> {
+    yield { type: 'token', text: EMPTY_ANSWER_FALLBACK };
+    yield { type: 'done', answer: EMPTY_ANSWER_FALLBACK, citations: [] };
   }
 
   return { ask };
